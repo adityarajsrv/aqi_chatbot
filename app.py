@@ -12,12 +12,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 WAQI_API_KEY = os.getenv("WAQI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# ✅ Define agent loader inside a cached function
+# ✅ Initialize agent (cached to avoid reloading on every run)
 @st.cache_resource
 def init_agent():
-    Google_API_KEY = os.getenv("GOOGLE_API_KEY")
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro", api_key=Google_API_KEY)
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro", api_key=GOOGLE_API_KEY)
     search = DuckDuckGoSearchRun()
     tools = [search]
     agent = initialize_agent(
@@ -30,92 +30,78 @@ def init_agent():
 
 agent, llm = init_agent()
 
-# ✅ AQI lookup helper function
+# ✅ Get AQI function
 def get_aqi(city):
-    """Fetches real-time AQI for a given city using the WAQI API."""
     url = f"https://api.waqi.info/feed/{city}/?token={WAQI_API_KEY}"
     response = requests.get(url)
     if response.status_code == 200:
         data = response.json()
         if data.get("status") == "ok":
-            aqi_value = data["data"]["aqi"]
-            return f"The AQI in {city.title()} is {aqi_value}."
+            aqi = data["data"]["aqi"]
+            return f"The AQI in {city.title()} is {aqi}."
         else:
-            error_msg = data.get("data") or "unknown error"
-            return f"Sorry, I couldn't fetch the AQI for {city.title()}. ({error_msg})"
+            return f"Sorry, couldn't fetch AQI for {city.title()}."
     else:
-        return "Error: Unable to fetch data at the moment. Please try again later."
+        return "Error: Failed to fetch AQI. Please try again later."
 
-
-# ✅ Sidebar for direct AQI lookup
+# ✅ Sidebar: City AQI Checker
 with st.sidebar:
     st.header("Real-Time AQI Lookup")
-    city_input = st.text_input("Enter a city name for AQI lookup:")
-    if st.button("Fetch AQI"):
-        if city_input:
-            aqi_result = get_aqi(city_input)
-            st.write(aqi_result)
+    city = st.text_input("Enter a city name")
+    if st.button("Get AQI"):
+        if city:
+            result = get_aqi(city)
+            st.write(result)
         else:
-            st.write("Please enter a city name.")
+            st.warning("Please enter a city name.")
 
-
-# ✅ Chat history initialization
+# ✅ Initialize session state
 if "history" not in st.session_state:
     st.session_state["history"] = []
 
-st.title("AQI Chatbot")
+st.title("🌫️ AQI Awareness Chatbot")
 
-# ✅ Display past chat messages
+# ✅ Show chat history
 for msg in st.session_state["history"]:
     st.chat_message(msg["role"]).write(msg["content"])
 
-# ✅ Accept new user input
-user_input = st.chat_input("Type your message here...")
+# ✅ Chat input
+user_input = st.chat_input("Ask about AQI, pollution effects, or prevention...")
 
 if user_input:
-    st.session_state["history"].append({"role": "user", "content": user_input})
     st.chat_message("user").write(user_input)
+    st.session_state["history"].append({"role": "user", "content": user_input})
 
-    conversation_text = ""
-    for msg in st.session_state["history"]:
-        conversation_text += f"{msg['role'].capitalize()}: {msg['content']}\n"
-
-    today_date = datetime.today().strftime("%d-%m-%Y")
-
-    prompt_template = (
-        f"You are an expert in air quality monitoring and environmental awareness, specializing in providing AQI updates and health recommendations for India. "
-        f"Today's date is {today_date}. "
-        "You can answer both simple and complex queries effectively. "
-        "For detailed questions requiring explanation, give a comprehensive, well-structured response. "
-        "Your goal is to keep the public informed about air quality, its health effects, and necessary precautions. "
-        "Based on the conversation so far:\n{conversation}\n"
-        "and the user's new message: {user_message}\n"
-        "Provide a response that is appropriately scaled in length, ensuring clarity, accuracy, and relevance."
+    # Build prompt
+    conversation_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["history"]])
+    today = datetime.today().strftime("%d-%m-%Y")
+    prompt = (
+        f"You are an expert AQI and environment chatbot. Date: {today}. "
+        f"Help users understand air pollution, AQI, health risks, and solutions. "
+        f"Conversation so far:\n{conversation_text}\n"
+        f"User's latest message: {user_input}"
     )
 
-    formatted_prompt = prompt_template.format(conversation=conversation_text, user_message=user_input)
-    human_message = HumanMessage(content=formatted_prompt)
+    human_message = HumanMessage(content=prompt)
+    assistant_box = st.chat_message("assistant")
+    response_placeholder = assistant_box.empty()
 
-    assistant_message = st.chat_message("assistant")
-    with st.spinner("Thinking..."):
-        full_response = ""
-        response_box = assistant_message.empty()  # 👈 placeholder for assistant message
-
-        try:
-            for chunk in agent.stream({"input": formatted_prompt}, {"configurable": {"thread_id": "default"}}):
+    try:
+        with st.spinner("Thinking..."):
+            final_response = ""
+            for chunk in agent.stream({"input": prompt}, {"configurable": {"thread_id": "default"}}):
                 if isinstance(chunk, dict) and "agent" in chunk:
-                    msgs = chunk["agent"].get("messages", [])
-                    if msgs and hasattr(msgs[0], "content"):
-                        full_response = msgs[0].content.strip()
-                        response_box.write(full_response)  # 👈 this writes to Streamlit web UI
-        except Exception as e:
-            full_response = "Sorry, something went wrong while processing your message."
-            response_box.write(full_response)
+                    messages = chunk["agent"].get("messages", [])
+                    if messages and hasattr(messages[0], "content"):
+                        final_response = messages[0].content.strip()
+                        response_placeholder.write(final_response)
+    except Exception as e:
+        final_response = "Sorry, something went wrong while processing your message."
+        response_placeholder.write(final_response)
 
-        if not full_response:
-            response = llm.invoke(formatted_prompt)
-            full_response = response.content.strip()
-            response_box.write(full_response)
+    if not final_response:
+        fallback = llm.invoke(prompt)
+        final_response = fallback.content.strip()
+        response_placeholder.write(final_response)
 
-    st.session_state["history"].append({"role": "assistant", "content": full_response})
-
+    st.session_state["history"].append({"role": "assistant", "content": final_response})
